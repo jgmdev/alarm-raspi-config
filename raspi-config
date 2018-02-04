@@ -1,0 +1,1029 @@
+#!/bin/sh
+# A stripped down version of raspi-config for archlinux arm with
+# some additions.
+#
+# Original source: https://github.com/RPi-Distro/raspi-config
+# License: https://github.com/RPi-Distro/raspi-config/blob/master/LICENSE
+#
+# Modifications for ArchLinux: Jefferson Gonzalez <jgmdev@gmail.com>
+#
+# Required archlinux packages: xorg-xrandr, libnewt
+
+PATH="$PATH:/opt/vc/bin"
+
+INTERACTIVE=True
+ASK_TO_REBOOT=0
+BLACKLIST=/etc/modprobe.d/raspi-blacklist.conf
+MODULELIST=/etc/modules-load.d/raspberrypi.conf
+CONFIG=/boot/config.txt
+
+is_pi () {
+  return 0
+}
+
+if is_pi ; then
+  CMDLINE=/boot/cmdline.txt
+else
+  CMDLINE=/proc/cmdline
+fi
+
+is_pione() {
+   if grep -q "^Revision\s*:\s*00[0-9a-fA-F][0-9a-fA-F]$" /proc/cpuinfo; then
+      return 0
+   elif grep -q "^Revision\s*:\s*[ 123][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]0[0-36][0-9a-fA-F]$" /proc/cpuinfo ; then
+      return 0
+   else
+      return 1
+   fi
+}
+
+is_pitwo() {
+   grep -q "^Revision\s*:\s*[ 123][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]04[0-9a-fA-F]$" /proc/cpuinfo
+   return $?
+}
+
+is_pizero() {
+   grep -q "^Revision\s*:\s*[ 123][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]0[9cC][0-9a-fA-F]$" /proc/cpuinfo
+   return $?
+}
+
+get_pi_type() {
+   if is_pione; then
+      echo 1
+   elif is_pitwo; then
+      echo 2
+   else
+      echo 0
+   fi
+}
+
+calc_wt_size() {
+  # NOTE: it's tempting to redirect stderr to /dev/null, so supress error
+  # output from tput. However in this case, tput detects neither stdout or
+  # stderr is a tty and so only gives default 80, 24 values
+  WT_HEIGHT=17
+  WT_WIDTH=$(tput cols)
+
+  if [ -z "$WT_WIDTH" ] || [ "$WT_WIDTH" -lt 60 ]; then
+    WT_WIDTH=80
+  fi
+  if [ "$WT_WIDTH" -gt 178 ]; then
+    WT_WIDTH=120
+  fi
+  WT_MENU_HEIGHT=$(($WT_HEIGHT-7))
+}
+
+do_about() {
+  whiptail --msgbox "\
+This is a stripped version of raspi-config found at
+https://github.com/RPi-Distro/raspi-config tailored for
+archlinux arm that packs some of the functionallity to
+modify the raspberry pi behaviour. The original license
+and credit can be found at:
+
+https://github.com/RPi-Distro/raspi-config/blob/master/LICENSE\
+" 20 70 1
+}
+
+enable_config_var() {
+  if sed -i -E "s/^ *?# *?$1=/$1=/" $CONFIG ; then
+    return 0
+  fi
+
+  return 1
+}
+
+disable_config_var() {
+  if sed -i -E "s/^ *?$1=/#$1=/" $CONFIG ; then
+    return 0
+  fi
+
+  return 1
+}
+
+set_config_var() {
+  local value=$(grep -P "^ *?#? *?$1=" $CONFIG)
+
+  if [ "$value" = "" ]; then
+    echo "$1=$2" >> $CONFIG
+  else
+    sed -i -E "s/^ *?#? *?$1=.*/$1=$2/" $CONFIG
+  fi
+}
+
+get_config_var() {
+  local value=$(grep -P "^ *?#? *?$1=" $CONFIG | rev | cut -d"=" -f1 | rev)
+
+  if [ "$value" = "" ]; then
+    echo "0"
+    return 1
+  fi
+
+  echo $value
+  return 0
+}
+
+get_overscan() {
+  OVS=$(get_config_var disable_overscan)
+  if [ $OVS -eq 1 ]; then
+    echo 1
+  else
+    echo 0
+  fi
+}
+
+do_overscan() {
+  DEFAULT=--defaultno
+  CURRENT=0
+  if [ $(get_overscan) -eq 0 ]; then
+      DEFAULT=
+      CURRENT=1
+  fi
+  if [ "$INTERACTIVE" = True ]; then
+    whiptail --yesno "Would you like to enable compensation for displays with overscan?" $DEFAULT 20 60 2
+    RET=$?
+  else
+    RET=$1
+  fi
+  if [ $RET -eq $CURRENT ]; then
+    ASK_TO_REBOOT=1
+  fi
+  if [ $RET -eq 0 ] ; then
+    set_config_var disable_overscan 0
+    STATUS=enabled
+  elif [ $RET -eq 1 ]; then
+    sed $CONFIG -i -e "s/^overscan_/#overscan_/"
+    set_config_var disable_overscan 1
+    STATUS=disabled
+  else
+    return $RET
+  fi
+  if [ "$INTERACTIVE" = True ]; then
+    whiptail --msgbox "Display overscan compensation is $STATUS" 20 60 1
+  fi
+}
+
+get_pixdub() {
+  if is_pi ; then
+    FBW=$(get_config_var framebuffer_width)
+    if [ $FBW -eq 0 ]; then
+      echo 1
+    else
+      echo 0
+    fi
+  else
+    if [ -e /etc/profile.d/pd.sh ] ; then
+      echo 0
+    else
+      echo 1
+    fi
+  fi
+}
+
+is_number() {
+  case $1 in
+    ''|*[!0-9]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+do_pixdub() {
+  DEFAULT=--defaultno
+  CURRENT=0
+  if [ $(get_pixdub) -eq 0 ]; then
+      DEFAULT=
+      CURRENT=1
+  fi
+  if [ "$INTERACTIVE" = True ]; then
+    whiptail --yesno "Would you like to enable pixel doubling?" $DEFAULT 20 60 2
+    RET=$?
+  else
+    RET=$1
+  fi
+  if is_pi ; then
+    if [ $RET -eq 0 ] ; then
+    XVAL=$(xrandr 2>&1 | grep current | cut -f2 -d, | cut -f3 -d' ')
+    YVAL=$(xrandr 2>&1 | grep current | cut -f2 -d, | cut -f5 -d' ')
+    if is_number $XVAL || is_number $YVAL ; then
+        if [ "$INTERACTIVE" = True ]; then
+          whiptail --msgbox "Could not read current screen dimensions - unable to enable pixel doubling" 20 60 1
+        fi
+      return 1
+    fi
+    NEWX=`expr $XVAL / 2`
+    NEWY=`expr $YVAL / 2`
+      set_config_var framebuffer_width $NEWX
+      set_config_var framebuffer_height $NEWY
+      set_config_var scaling_kernel 8
+      STATUS=enabled
+    elif [ $RET -eq 1 ]; then
+      disable_config_var framebuffer_width
+      disable_config_var framebuffer_height
+      disable_config_var scaling_kernel
+      STATUS=disabled
+    else
+      return $RET
+    fi
+  else
+    if [ -e /etc/profile.d/pd.sh ] ; then
+      rm /etc/profile.d/pd.sh
+    fi
+    if [ $RET -eq 0 ] ; then
+      DEV=$(xrandr | grep -w connected | cut -f1 -d' ')
+      for item in $DEV
+      do
+        echo xrandr --output $item --scale 0.5x0.5 >> /etc/profile.d/pd.sh
+      done
+      STATUS=enabled
+    elif [ $RET -eq 1 ]; then
+      STATUS=disabled
+    else
+      return $RET
+    fi
+  fi
+  if [ $RET -eq $CURRENT ]; then
+    ASK_TO_REBOOT=1
+  fi
+  if [ "$INTERACTIVE" = True ]; then
+    whiptail --msgbox "Pixel doubling is $STATUS" 20 60 1
+  fi
+}
+
+do_splashscreen() { # Splash screen rainbow
+  DEFAULT=--defaultno
+  if [ $(get_config_var disable_splash) -eq 1 ]; then
+      DEFAULT=
+  fi
+  whiptail --yesno "Would you like to disable the rainbow splash screen?" $DEFAULT 20 60 2
+  RET=$?
+  local status="disabled"
+  if [ $RET -eq 0 ]; then
+    set_config_var disable_splash 1
+  else
+    set_config_var disable_splash 0
+    status="enabled"
+  fi
+  whiptail --msgbox "Splash screen is $status" 20 60 1
+}
+
+do_memory_split() { # Memory Split
+  if [ -e /boot/start_cd.elf ]; then
+    # New-style memory split setting
+    ## get current memory split from /boot/config.txt
+    arm=$(vcgencmd get_mem arm | cut -d '=' -f 2 | cut -d 'M' -f 1)
+    gpu=$(vcgencmd get_mem gpu | cut -d '=' -f 2 | cut -d 'M' -f 1)
+    tot=$(($arm+$gpu))
+    if [ $tot -gt 512 ]; then
+      CUR_GPU_MEM=$(get_config_var gpu_mem_1024)
+    elif [ $tot -gt 256 ]; then
+      CUR_GPU_MEM=$(get_config_var gpu_mem_512)
+    else
+      CUR_GPU_MEM=$(get_config_var gpu_mem_256)
+    fi
+    if [ -z "$CUR_GPU_MEM" ] || [ $CUR_GPU_MEM = "0" ]; then
+      CUR_GPU_MEM=$(get_config_var gpu_mem)
+    fi
+    [ -z "$CUR_GPU_MEM" ] || [ $CUR_GPU_MEM = "0" ] && CUR_GPU_MEM=64
+    ## ask users what gpu_mem they want
+    if [ "$INTERACTIVE" = True ]; then
+      NEW_GPU_MEM=$(whiptail --inputbox "How much memory (MB) should the GPU have?  e.g. 16/32/64/128/256" \
+        20 70 -- "$CUR_GPU_MEM" 3>&1 1>&2 2>&3)
+    else
+      NEW_GPU_MEM=$1
+      true
+    fi
+    if [ $? -eq 0 ]; then
+      if [ $(get_config_var gpu_mem_1024) != "0" ] || [ $(get_config_var gpu_mem_512) != "0" ] || [ $(get_config_var gpu_mem_256) != "0" ]; then
+        if [ "$INTERACTIVE" = True ]; then
+          whiptail --msgbox "Device-specific memory settings were found. These have been cleared." 20 60 2
+        fi
+        disable_config_var gpu_mem_1024
+        disable_config_var gpu_mem_512
+        disable_config_var gpu_mem_256
+      fi
+      set_config_var gpu_mem "$NEW_GPU_MEM"
+      ASK_TO_REBOOT=1
+    fi
+  fi
+}
+
+do_keys() { # License keys
+  ## get current licenses
+  local mpg2=$(get_config_var decode_MPG2)
+  local wvc1=$(get_config_var decode_WVC1)
+
+  ## ask users for mpg2 license
+  mpg2=$(whiptail --inputbox "Enter the MPG2 license  e.g. 0x12345678" \
+    20 70 -- "$mpg2" 3>&1 1>&2 2>&3)
+
+  if [ $? -eq 0 ]; then
+    set_config_var decode_MPG2 "$mpg2"
+    ASK_TO_REBOOT=1
+  fi
+
+  ## ask users for wvc1 license
+  wvc1=$(whiptail --inputbox "Enter the WVC1 license  e.g. 0x12345678" \
+    20 70 -- "$wvc1" 3>&1 1>&2 2>&3)
+
+  if [ $? -eq 0 ]; then
+    set_config_var decode_WVC1 "$wvc1"
+    ASK_TO_REBOOT=1
+  fi
+}
+
+do_overclock() {
+  if ! is_pione && ! is_pitwo; then
+    whiptail --msgbox "This Pi cannot be overclocked." 20 60 2
+    return 1
+  fi
+  if [ "$INTERACTIVE" = True ]; then
+    whiptail --msgbox "\
+Be aware that overclocking may reduce the lifetime of your
+Raspberry Pi. If overclocking at a certain level causes
+system instability, try a more modest overclock. Hold down
+shift during boot to temporarily disable overclock.
+See http://elinux.org/RPi_Overclocking for more information.\
+" 20 70 1
+   if is_pione; then
+    OVERCLOCK=$(whiptail --menu "Choose overclock preset" 20 60 10 \
+      "None" "700MHz ARM, 250MHz core, 400MHz SDRAM, 0 overvolt" \
+      "Modest" "800MHz ARM, 250MHz core, 400MHz SDRAM, 0 overvolt" \
+      "Medium" "900MHz ARM, 250MHz core, 450MHz SDRAM, 2 overvolt" \
+      "High" "950MHz ARM, 250MHz core, 450MHz SDRAM, 6 overvolt" \
+      "Turbo" "1000MHz ARM, 500MHz core, 600MHz SDRAM, 6 overvolt" \
+      3>&1 1>&2 2>&3)
+   elif is_pitwo; then
+    OVERCLOCK=$(whiptail --menu "Choose overclock preset" 20 60 10 \
+      "None" "900MHz ARM, 250MHz core, 450MHz SDRAM, 0 overvolt" \
+      "High" "1000MHz ARM, 500MHz core, 500MHz SDRAM, 2 overvolt" \
+      3>&1 1>&2 2>&3)
+   fi
+  else
+    OVERCLOCK=$1
+    true
+  fi
+  if [ $? -eq 0 ]; then
+    case "$OVERCLOCK" in
+      None)
+        clear_overclock
+        ;;
+      Modest)
+        set_overclock Modest 800 250 400 0
+        ;;
+      Medium)
+        set_overclock Medium 900 250 450 2
+        ;;
+      High)
+        if is_pione; then
+          set_overclock High 950 250 450 6
+        else
+          set_overclock High 1000 500 500 2
+        fi
+        ;;
+      Turbo)
+        set_overclock Turbo 1000 500 600 6
+        ;;
+      *)
+        whiptail --msgbox "Programmer error, unrecognised overclock preset" 20 60 2
+        return 1
+        ;;
+    esac
+    ASK_TO_REBOOT=1
+  fi
+}
+
+set_overclock() {
+  set_config_var arm_freq $2 &&
+  set_config_var core_freq $3 &&
+  set_config_var sdram_freq $4 &&
+  set_config_var over_voltage $5 &&
+  if [ "$INTERACTIVE" = True ]; then
+    whiptail --msgbox "Set overclock to preset '$1'" 20 60 2
+  fi
+}
+
+clear_overclock () {
+  disable_config_var arm_freq &&
+  disable_config_var core_freq &&
+  disable_config_var sdram_freq &&
+  disable_config_var over_voltage &&
+  if [ "$INTERACTIVE" = True ]; then
+    whiptail --msgbox "Set overclock to preset 'None'" 20 60 2
+  fi
+}
+
+get_spi() {
+  if grep -q -E "^(device_tree_param|dtparam)=([^,]*,)*spi(=(on|true|yes|1))?(,.*)?$" $CONFIG; then
+    echo 0
+  else
+    echo 1
+  fi
+}
+
+do_spi() {
+  DEFAULT=--defaultno
+  if [ $(get_spi) -eq 0 ]; then
+    DEFAULT=
+  fi
+  if [ "$INTERACTIVE" = True ]; then
+    whiptail --yesno "Would you like the SPI interface to be enabled?" $DEFAULT 20 60 2
+    RET=$?
+  else
+    RET=$1
+  fi
+  if [ $RET -eq 0 ]; then
+    SETTING=on
+    STATUS=enabled
+  elif [ $RET -eq 1 ]; then
+    SETTING=off
+    STATUS=disabled
+  else
+    return $RET
+  fi
+
+  set_config_var dtparam=spi $SETTING &&
+  if ! [ -e $BLACKLIST ]; then
+    touch $BLACKLIST
+  fi
+  sed $BLACKLIST -i -e "s/^\(blacklist[[:space:]]*spi[-_]bcm2708\)/#\1/"
+  dtparam spi=$SETTING
+
+  if [ "$INTERACTIVE" = True ]; then
+    whiptail --msgbox "The SPI interface is $STATUS" 20 60 1
+  fi
+}
+
+get_i2c() {
+  if grep -q -E "^(device_tree_param|dtparam)=([^,]*,)*i2c(_arm)?(=(on|true|yes|1))?(,.*)?$" $CONFIG; then
+    echo 0
+  else
+    echo 1
+  fi
+}
+
+do_i2c() {
+  DEFAULT=--defaultno
+  if [ $(get_i2c) -eq 0 ]; then
+    DEFAULT=
+  fi
+  if [ "$INTERACTIVE" = True ]; then
+    whiptail --yesno "Would you like the ARM I2C interface to be enabled?" $DEFAULT 20 60 2
+    RET=$?
+  else
+    RET=$1
+  fi
+  if [ $RET -eq 0 ]; then
+    SETTING=on
+    STATUS=enabled
+  elif [ $RET -eq 1 ]; then
+    SETTING=off
+    STATUS=disabled
+  else
+    return $RET
+  fi
+
+  set_config_var dtparam=i2c_arm $SETTING &&
+  if ! [ -e $BLACKLIST ]; then
+    touch $BLACKLIST
+  fi
+  sed $BLACKLIST -i -e "s/^\(blacklist[[:space:]]*i2c[-_]bcm2708\)/#\1/"
+  sed $MODULELIST -i -e "s/^#[[:space:]]*\(i2c[-_]dev\)/\1/"
+  if ! grep -q "^i2c[-_]dev" $MODULELIST; then
+    printf "i2c-dev\n" >> $MODULELIST
+  fi
+  dtparam i2c_arm=$SETTING
+  modprobe i2c-dev
+
+  if [ "$INTERACTIVE" = True ]; then
+    whiptail --msgbox "The ARM I2C interface is $STATUS" 20 60 1
+  fi
+}
+
+get_serial() {
+  if grep -q -E "console=(serial0|ttyAMA0|ttyS0)" $CMDLINE ; then
+    echo 0
+  else
+    echo 1
+  fi
+}
+
+get_serial_hw() {
+  if grep -q -E "^enable_uart=1" $CONFIG ; then
+    echo 0
+  elif grep -q -E "^enable_uart=0" $CONFIG ; then
+    echo 1
+  elif [ -e /dev/serial0 ] ; then
+    echo 0
+  else
+    echo 1
+  fi
+}
+
+do_serial() {
+  DEFAULTS=--defaultno
+  DEFAULTH=--defaultno
+  CURRENTS=0
+  CURRENTH=0
+  if [ $(get_serial) -eq 0 ]; then
+      DEFAULTS=
+      CURRENTS=1
+  fi
+  if [ $(get_serial_hw) -eq 0 ]; then
+      DEFAULTH=
+      CURRENTH=1
+  fi
+  if [ "$INTERACTIVE" = True ]; then
+    whiptail --yesno "Would you like a login shell to be accessible over serial?" $DEFAULTS 20 60 2
+    RET=$?
+  else
+    RET=$1
+  fi
+  if [ $RET -eq $CURRENTS ]; then
+    ASK_TO_REBOOT=1
+  fi
+  if [ $RET -eq 0 ]; then
+    if grep -q "console=ttyAMA0" $CMDLINE ; then
+      if [ -e /proc/device-tree/aliases/serial0 ]; then
+        sed -i $CMDLINE -e "s/console=ttyAMA0/console=serial0/"
+      fi
+    elif ! grep -q "console=ttyAMA0" $CMDLINE && ! grep -q "console=serial0" $CMDLINE ; then
+      if [ -e /proc/device-tree/aliases/serial0 ]; then
+        sed -i $CMDLINE -e "s/root=/console=serial0,115200 root=/"
+      else
+        sed -i $CMDLINE -e "s/root=/console=ttyAMA0,115200 root=/"
+      fi
+    fi
+    set_config_var enable_uart 1
+    SSTATUS=enabled
+    HSTATUS=enabled
+  elif [ $RET -eq 1 ]; then
+    sed -i $CMDLINE -e "s/console=ttyAMA0,[0-9]\+ //"
+    sed -i $CMDLINE -e "s/console=serial0,[0-9]\+ //"
+    SSTATUS=disabled
+    if [ "$INTERACTIVE" = True ]; then
+      whiptail --yesno "Would you like the serial port hardware to be enabled?" $DEFAULTH 20 60 2
+      RET=$?
+    else
+      RET=1
+    fi
+    if [ $RET -eq $CURRENTH ]; then
+     ASK_TO_REBOOT=1
+    fi
+    if [ $RET -eq 0 ]; then
+      set_config_var enable_uart 1
+      HSTATUS=enabled
+    elif [ $RET -eq 1 ]; then
+      set_config_var enable_uart 0
+      HSTATUS=disabled
+    else
+      return $RET
+    fi
+  else
+    return $RET
+  fi
+  if [ "$INTERACTIVE" = True ]; then
+      whiptail --msgbox "The serial login shell is $SSTATUS\nThe serial interface is $HSTATUS" 20 60 1
+  fi
+}
+
+get_camera() {
+  CAM=$(get_config_var start_x)
+  if [ $CAM -eq 1 ]; then
+    echo 0
+  else
+    echo 1
+  fi
+}
+
+do_camera() {
+  if [ ! -e /boot/start_x.elf ]; then
+    whiptail --msgbox "Your firmware appears to be out of date (no start_x.elf). Please update" 20 60 2
+    return 1
+  fi
+  sed $CONFIG -i -e "s/^startx/#startx/"
+  sed $CONFIG -i -e "s/^fixup_file/#fixup_file/"
+
+  DEFAULT=--defaultno
+  CURRENT=0
+  if [ $(get_camera) -eq 0 ]; then
+      DEFAULT=
+      CURRENT=1
+  fi
+  if [ "$INTERACTIVE" = True ]; then
+    whiptail --yesno "Would you like the camera interface to be enabled?" $DEFAULT 20 60 2
+    RET=$?
+  else
+    RET=$1
+  fi
+  if [ $RET -eq $CURRENT ]; then
+    ASK_TO_REBOOT=1
+  fi
+  if [ $RET -eq 0 ]; then
+    set_config_var start_x 1
+    CUR_GPU_MEM=$(get_config_var gpu_mem)
+    if [ -z "$CUR_GPU_MEM" ] || [ "$CUR_GPU_MEM" -lt 128 ]; then
+      set_config_var gpu_mem 128
+    fi
+    STATUS=enabled
+  elif [ $RET -eq 1 ]; then
+    set_config_var start_x 0
+    sed $CONFIG -i -e "s/^start_file/#start_file/"
+    STATUS=disabled
+  else
+    return $RET
+  fi
+  if [ "$INTERACTIVE" = True ]; then
+    whiptail --msgbox "The camera interface is $STATUS" 20 60 1
+  fi
+}
+
+get_onewire() {
+  if grep -q -E "^dtoverlay=w1-gpio" $CONFIG; then
+    echo 0
+  else
+    echo 1
+  fi
+}
+
+do_onewire() {
+  DEFAULT=--defaultno
+  CURRENT=0
+  if [ $(get_onewire) -eq 0 ]; then
+    DEFAULT=
+    CURRENT=1
+  fi
+  if [ "$INTERACTIVE" = True ]; then
+    whiptail --yesno "Would you like the one-wire interface to be enabled?" $DEFAULT 20 60 2
+    RET=$?
+  else
+    RET=$1
+  fi
+  if [ $RET -eq $CURRENT ]; then
+    ASK_TO_REBOOT=1
+  fi
+  if [ $RET -eq 0 ]; then
+    sed $CONFIG -i -e "s/^#dtoverlay=w1-gpio/dtoverlay=w1-gpio/"
+    if ! grep -q -E "^dtoverlay=w1-gpio" $CONFIG; then
+      printf "dtoverlay=w1-gpio\n" >> $CONFIG
+    fi
+    STATUS=enabled
+  elif [ $RET -eq 1 ]; then
+    sed $CONFIG -i -e "s/^dtoverlay=w1-gpio/#dtoverlay=w1-gpio/"
+    STATUS=disabled
+  else
+    return $RET
+  fi
+  if [ "$INTERACTIVE" = True ]; then
+    whiptail --msgbox "The one-wire interface is $STATUS" 20 60 1
+  fi
+}
+
+do_gldriver() {
+  if [ ! -e /boot/overlays/vc4-kms-v3d.dtbo ]; then
+    whiptail --msgbox "Driver and kernel not present on your system. Please update" 20 60 2
+    return 1
+  fi
+  if [ "$(pacman -Qi mesa | grep 'not found')" != "" ]; then
+    whiptail --msgbox "mesa not found - please install" 20 60 2
+    return 1
+  fi
+  GLOPT=$(whiptail --title "Raspberry Pi Software Configuration Tool (raspi-config)" --menu "GL Driver" $WT_HEIGHT $WT_WIDTH $WT_MENU_HEIGHT \
+    "G1 GL (Full KMS)" "OpenGL desktop driver with full KMS" \
+    "G2 GL (Fake KMS)" "OpenGL desktop driver with fake KMS" \
+    "G3 Legacy" "Original non-GL desktop driver" \
+    3>&1 1>&2 2>&3)
+  local remove_packages=0
+  if [ $? -eq 0 ]; then
+    case "$GLOPT" in
+      G1*)
+        if ! grep -q -E "^dtoverlay=vc4-kms-v3d" $CONFIG; then
+          ASK_TO_REBOOT=1
+        fi
+        sed $CONFIG -i -e "s/^dtoverlay=vc4-fkms-v3d/#dtoverlay=vc4-fkms-v3d/"
+        sed $CONFIG -i -e "s/^#dtoverlay=vc4-kms-v3d/dtoverlay=vc4-kms-v3d/"
+        if ! grep -q -E "^dtoverlay=vc4-kms-v3d" $CONFIG; then
+          printf "dtoverlay=vc4-kms-v3d\n" >> $CONFIG
+        fi
+        STATUS="The full KMS GL driver is enabled."
+        remove_packages=1
+        ;;
+      G2*)
+        if ! grep -q -E "^dtoverlay=vc4-fkms-v3d" $CONFIG; then
+          ASK_TO_REBOOT=1
+        fi
+        sed $CONFIG -i -e "s/^dtoverlay=vc4-kms-v3d/#dtoverlay=vc4-kms-v3d/"
+        sed $CONFIG -i -e "s/^#dtoverlay=vc4-fkms-v3d/dtoverlay=vc4-fkms-v3d/"
+        if ! grep -q -E "^dtoverlay=vc4-fkms-v3d" $CONFIG; then
+          printf "dtoverlay=vc4-fkms-v3d\n" >> $CONFIG
+        fi
+        STATUS="The fake KMS GL driver is enabled."
+        remove_packages=1
+        ;;
+      G3*)
+        if grep -q -E "^dtoverlay=vc4-f?kms-v3d" $CONFIG; then
+          ASK_TO_REBOOT=1
+        fi
+        sed $CONFIG -i -e "s/^dtoverlay=vc4-kms-v3d/#dtoverlay=vc4-kms-v3d/"
+        sed $CONFIG -i -e "s/^dtoverlay=vc4-fkms-v3d/#dtoverlay=vc4-fkms-v3d/"
+        STATUS="The GL driver is disabled."
+        ;;
+      *)
+        whiptail --msgbox "Programmer error, unrecognised boot option" 20 60 2
+        return 1
+        ;;
+    esac
+    if [ $remove_packages -eq 1 ]; then
+      set_config_var cma_lwm 16
+      set_config_var cma_hwm $(get_config_var gpu_mem)
+      set_config_var cma_offline_start 16
+      pacman --noconfirm -Rn xf86-video-fbdev
+      pacman --noconfirm -Rn xf86-video-fbturbo-git
+      if [ -e /etc/X11/xorg.conf ]; then
+        mv /etc/X11/xorg.conf /etc/X11/xorg.conf.config
+      fi
+    else
+      enable_config_var gpu_mem
+      disable_config_var cma_lwm
+      disable_config_var cma_hwm
+      disable_config_var cma_offline_start
+      pacman --noconfirm -S xf86-video-fbdev
+      if [ -e /etc/X11/xorg.conf.config ]; then
+        mv /etc/X11/xorg.conf.config /etc/X11/xorg.conf
+      fi
+    fi
+  else
+    return 0
+  fi
+  if echo "$GLOPT" | grep -q -E "1" ; then
+    if grep -q "splash" $CMDLINE ; then
+      sed -i $CMDLINE -e "s/ quiet//"
+      sed -i $CMDLINE -e "s/ splash//"
+      sed -i $CMDLINE -e "s/ plymouth.ignore-serial-consoles//"
+    fi
+    sed $CONFIG -i -e "s/^gpu_mem/#gpu_mem/"
+  fi
+  whiptail --msgbox "$STATUS" 20 60 1
+ }
+
+do_audio() {
+  if [ "$INTERACTIVE" = True ]; then
+    AUDIO_OUT=$(whiptail --menu "Choose the audio output" 20 60 10 \
+      "0" "Auto" \
+      "1" "Force 3.5mm ('headphone') jack" \
+      "2" "Force HDMI" \
+      3>&1 1>&2 2>&3)
+  else
+    AUDIO_OUT=$1
+  fi
+  if [ $? -eq 0 ]; then
+    amixer cset numid=3 "$AUDIO_OUT"
+  fi
+}
+
+do_resolution() {
+  if [ "$INTERACTIVE" = True ]; then
+    CMODE=$(get_config_var hdmi_mode)
+    CGROUP=$(get_config_var hdmi_group)
+    if [ $CMODE -eq 0 ] ; then
+      CSET="Default"
+    elif [ $CGROUP -eq 2 ] ; then
+      CSET="DMT Mode "$CMODE
+    else
+      CSET="CEA Mode "$CMODE
+    fi
+    oIFS="$IFS"
+    IFS="/"
+    if tvservice -d /dev/null | grep -q Nothing ; then
+      value="Default/720x480/DMT Mode 4/640x480 60Hz 4:3/DMT Mode 9/800x600 60Hz 4:3/DMT Mode 16/1024x768 60Hz 4:3/DMT Mode 85/1280x720 60Hz 16:9/DMT Mode 35/1280x1024 60Hz 5:4/DMT Mode 51/1600x1200 60Hz 4:3/DMT Mode 82/1920x1080 60Hz 16:9/"
+    else
+      value="Default/Monitor preferred resolution/"
+      value=$value$(tvservice -m CEA | grep progressive | cut -b 12- | sed 's/mode \([0-9]\+\): \([0-9]\+\)x\([0-9]\+\) @ \([0-9]\+\)Hz \([0-9]\+\):\([0-9]\+\), clock:[0-9]\+MHz progressive/CEA Mode \1\/\2x\3 \4Hz \5:\6/' | tr '\n' '/')
+      value=$value$(tvservice -m DMT | grep progressive | cut -b 12- | sed 's/mode \([0-9]\+\): \([0-9]\+\)x\([0-9]\+\) @ \([0-9]\+\)Hz \([0-9]\+\):\([0-9]\+\), clock:[0-9]\+MHz progressive/DMT Mode \1\/\2x\3 \4Hz \5:\6/' | tr '\n' '/')
+    fi
+    RES=$(whiptail --default-item $CSET --menu "Choose screen resolution" 20 60 10 ${value} 3>&1 1>&2 2>&3)
+    STATUS=$?
+    IFS=$oIFS
+    if [ $STATUS -eq 0 ] ; then
+      GRS=$(echo "$RES" | cut -d ' ' -f 1)
+      MODE=$(echo "$RES" | cut -d ' ' -f 3)
+      if [ $GRS = "Default" ] ; then
+        MODE=0
+      elif [ $GRS = "DMT" ] ; then
+        GROUP=2
+      else
+        GROUP=1
+      fi
+    fi
+  else
+    GROUP=$1
+    MODE=$2
+    STATUS=0
+  fi
+  if [ $STATUS -eq 0 ]; then
+    if [ $MODE -eq 0 ]; then
+      disable_config_var hdmi_force_hotplug
+      disable_config_var hdmi_group
+      disable_config_var hdmi_mode
+    else
+      set_config_var hdmi_force_hotplug 1
+      set_config_var hdmi_group $GROUP
+      set_config_var hdmi_mode $MODE
+    fi
+    if [ "$INTERACTIVE" = True ]; then
+      if [ $MODE -eq 0 ] ; then
+        whiptail --msgbox "The resolution is set to default" 20 60 1
+      else
+        whiptail --msgbox "The resolution is set to $GRS mode $MODE" 20 60 1
+      fi
+    fi
+    if [ $MODE -eq 0 ] ; then
+      TSET="Default"
+    elif [ $GROUP -eq 2 ] ; then
+      TSET="DMT Mode "$MODE
+    else
+      TSET="CEA Mode "$MODE
+    fi
+    if [ "$TSET" != "$CSET" ] ; then
+      ASK_TO_REBOOT=1
+    fi
+  fi
+}
+
+do_usbboot() { # Usb Boot
+  DEFAULT=--defaultno
+  if [ $(get_config_var program_usb_boot_mode) -eq 1 ]; then
+      DEFAULT=
+  fi
+  whiptail --yesno "Would you like to enable the usb boot flag?" $DEFAULT 20 60 2
+  RET=$?
+  local status="enabled"
+  if [ $RET -eq 0 ]; then
+    set_config_var program_usb_boot_mode 1
+  else
+    set_config_var program_usb_boot_mode 0
+    status="disabled"
+  fi
+  whiptail --msgbox "USB booting is $status" 20 60 1
+}
+
+do_finish() {
+  if [ $ASK_TO_REBOOT -eq 1 ]; then
+    whiptail --yesno "Would you like to reboot now?" 20 60 2
+    if [ $? -eq 0 ]; then # yes
+      sync
+      systemctl reboot
+    fi
+  fi
+  exit 0
+}
+
+nonint() {
+  "$@"
+}
+
+#
+# Command line options for non-interactive use
+#
+for i in $*
+do
+  case $i in
+  --memory-split)
+    OPT_MEMORY_SPLIT=GET
+    printf "Not currently supported\n"
+    exit 1
+    ;;
+  --memory-split=*)
+    OPT_MEMORY_SPLIT=`echo $i | sed 's/[-a-zA-Z0-9]*=//'`
+    printf "Not currently supported\n"
+    exit 1
+    ;;
+  nonint)
+    INTERACTIVE=False
+    "$@"
+    exit $?
+    ;;
+  *)
+    # unknown option
+    ;;
+  esac
+done
+
+# Everything else needs to be run as root
+if [ $(id -u) -ne 0 ]; then
+  printf "Script must be run as root. Try 'sudo raspi-config'\n"
+  exit 1
+fi
+
+do_boot_menu() {
+  FUN=$(whiptail --title "Raspberry Pi Software Configuration Tool (raspi-config)" --menu "Boot Options" $WT_HEIGHT $WT_WIDTH $WT_MENU_HEIGHT --cancel-button Back --ok-button Select \
+    "B1 USB Boot" "Enable/Disable the programming to boot from a usb drive" \
+    3>&1 1>&2 2>&3)
+  RET=$?
+  if [ $RET -eq 1 ]; then
+    return 0
+  elif [ $RET -eq 0 ]; then
+    case "$FUN" in
+      B1\ *) do_usbboot ;;
+      *) whiptail --msgbox "Programmer error: unrecognized option" 20 60 1 ;;
+    esac || whiptail --msgbox "There was an error running option $FUN" 20 60 1
+  fi
+}
+
+do_interface_menu() {
+  FUN=$(whiptail --title "Raspberry Pi Software Configuration Tool (raspi-config)" --menu "Interfacing Options" $WT_HEIGHT $WT_WIDTH $WT_MENU_HEIGHT --cancel-button Back --ok-button Select \
+    "P1 Camera" "Enable/Disable connection to the Raspberry Pi Camera" \
+    "P2 SPI" "Enable/Disable automatic loading of SPI kernel module" \
+    "P3 I2C" "Enable/Disable automatic loading of I2C kernel module" \
+    "P4 Serial" "Enable/Disable shell and kernel messages on the serial connection" \
+    "P5 1-Wire" "Enable/Disable one-wire interface" \
+    3>&1 1>&2 2>&3)
+  RET=$?
+  if [ $RET -eq 1 ]; then
+    return 0
+  elif [ $RET -eq 0 ]; then
+    case "$FUN" in
+      P1\ *) do_camera ;;
+      P2\ *) do_spi ;;
+      P3\ *) do_i2c ;;
+      P4\ *) do_serial ;;
+      P5\ *) do_onewire ;;
+      *) whiptail --msgbox "Programmer error: unrecognized option" 20 60 1 ;;
+    esac || whiptail --msgbox "There was an error running option $FUN" 20 60 1
+  fi
+}
+
+do_advanced_menu() {
+  FUN=$(whiptail --title "Raspberry Pi Software Configuration Tool (raspi-config)" --menu "Advanced Options" $WT_HEIGHT $WT_WIDTH $WT_MENU_HEIGHT --cancel-button Back --ok-button Select \
+    "A1 Overscan" "You may need to configure overscan if black bars are present on display" \
+    "A2 Memory Split" "Change the amount of memory made available to the GPU" \
+    "A3 Audio" "Force audio out through HDMI or 3.5mm jack" \
+    "A4 Resolution" "Set a specific screen resolution" \
+    "A5 Pixel Doubling" "Enable/Disable 2x2 pixel mapping" \
+    "A6 GL Driver" "Enable/Disable experimental desktop GL driver" \
+    "A7 Splash Screen" "Enable/Disable the rainbow splash screen on boot" \
+    3>&1 1>&2 2>&3)
+  RET=$?
+  if [ $RET -eq 1 ]; then
+    return 0
+  elif [ $RET -eq 0 ]; then
+    case "$FUN" in
+      A1\ *) do_overscan ;;
+      A2\ *) do_memory_split ;;
+      A3\ *) do_audio ;;
+      A4\ *) do_resolution ;;
+      A5\ *) do_pixdub ;;
+      A6\ *) do_gldriver ;;
+      A7\ *) do_splashscreen ;;
+      *) whiptail --msgbox "Programmer error: unrecognized option" 20 60 1 ;;
+    esac || whiptail --msgbox "There was an error running option $FUN" 20 60 1
+  fi
+}
+
+#
+# Interactive use loop
+#
+if [ "$INTERACTIVE" = True ]; then
+  [ -e $CONFIG ] || touch $CONFIG
+  calc_wt_size
+  while true; do
+    if is_pi ; then
+      FUN=$(whiptail --title "Raspberry Pi Software Configuration Tool (raspi-config)" --backtitle "$(cat /proc/device-tree/model)" --menu "Setup Options" $WT_HEIGHT $WT_WIDTH $WT_MENU_HEIGHT --cancel-button Finish --ok-button Select \
+        "1 Boot Options" "Configure boot options" \
+        "2 Interfacing Options" "Configure connections to peripherals" \
+        "3 Overclock" "Configure overclocking for your Pi" \
+        "4 Advanced Options" "Configure advanced settings" \
+        "5 License Keys" "Edit the MPG2 and WVC1 license keys" \
+        "6 About raspi-config" "Information about this configuration tool" \
+        3>&1 1>&2 2>&3)
+    else
+      FUN=$(whiptail --title "Raspberry Pi Software Configuration Tool (raspi-config)" --menu "Setup Options" $WT_HEIGHT $WT_WIDTH $WT_MENU_HEIGHT --cancel-button Finish --ok-button Select \
+        "1 Pixel Doubling" "Enable/Disable 2x2 pixel mapping" \
+        "2 About raspi-config" "Information about this configuration tool" \
+        3>&1 1>&2 2>&3)
+    fi
+    RET=$?
+    if [ $RET -eq 1 ]; then
+      do_finish
+    elif [ $RET -eq 0 ]; then
+      if is_pi ; then
+        case "$FUN" in
+          1\ *) do_boot_menu ;;
+          2\ *) do_interface_menu ;;
+          3\ *) do_overclock ;;
+          4\ *) do_advanced_menu ;;
+          5\ *) do_keys ;;
+          6\ *) do_about ;;
+          *) whiptail --msgbox "Programmer error: unrecognized option" 20 60 1 ;;
+        esac || whiptail --msgbox "There was an error running option $FUN" 20 60 1
+      else
+        case "$FUN" in
+          1\ *) do_pixdub ;;
+          2\ *) do_about ;;
+          *) whiptail --msgbox "Programmer error: unrecognized option" 20 60 1 ;;
+        esac || whiptail --msgbox "There was an error running option $FUN" 20 60 1
+      fi
+    else
+      exit 1
+    fi
+  done
+fi
